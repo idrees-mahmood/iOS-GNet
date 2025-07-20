@@ -41,18 +41,37 @@ struct MessagePadding {
         
         // Last byte tells us how much padding to remove
         let paddingLength = Int(data[data.count - 1])
-        guard paddingLength > 0 && paddingLength <= data.count else { 
-            // Debug logging for 243-byte packets
-            if data.count == 243 {
-            }
-            return data 
+        
+        // Validate PKCS#7 padding constraints
+        // - Padding length must be between 1 and 255 (PKCS#7 limit)
+        // - Padding length cannot exceed data size
+        // - For valid PKCS#7, all padding bytes should have the same value
+        guard paddingLength > 0 && paddingLength <= min(data.count, 255) else {
+            #if DEBUG
+            print("MessagePadding: Invalid padding length \(paddingLength) for data size \(data.count) - treating as unpadded")
+            print("MessagePadding: Last few bytes: \(data.suffix(min(10, data.count)).map { String(format: "0x%02x", $0) }.joined(separator: " "))")
+            #endif
+            return data  // Return original data if padding seems invalid
+        }
+        
+        // Additional validation: check if all padding bytes have the same value (proper PKCS#7)
+        let paddingBytes = data.suffix(paddingLength)
+        let isValidPKCS7 = paddingBytes.allSatisfy { $0 == UInt8(paddingLength) }
+        
+        guard isValidPKCS7 else {
+            #if DEBUG
+            print("MessagePadding: Invalid PKCS#7 padding detected - padding bytes don't match expected value \(paddingLength)")
+            print("MessagePadding: Actual padding bytes: \(paddingBytes.map { String(format: "0x%02x", $0) }.joined(separator: " "))")
+            print("MessagePadding: Treating as unpadded data")
+            #endif
+            return data  // Return original data if PKCS#7 validation fails
         }
         
         let result = data.prefix(data.count - paddingLength)
         
-        // Debug logging for 243-byte packets
-        if data.count == 243 {
-        }
+        #if DEBUG
+        print("MessagePadding: Removed \(paddingLength) valid PKCS#7 padding bytes, \(data.count) -> \(result.count)")
+        #endif
         
         return result
     }

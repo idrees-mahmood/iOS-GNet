@@ -138,9 +138,19 @@ struct BinaryProtocol {
     
     // Decode binary data to BitchatPacket
     static func decode(_ data: Data) -> BitchatPacket? {
+        #if DEBUG
+        print("BinaryProtocol: Decode input - original size: \(data.count) bytes")
+        #endif
+        
         // Remove padding first
         let unpaddedData = MessagePadding.unpad(data)
         
+        #if DEBUG
+        print("BinaryProtocol: After unpadding - size: \(unpaddedData.count) bytes")
+        if unpaddedData.count < headerSize + senderIDSize {
+            print("BinaryProtocol: Packet too small - need \(headerSize + senderIDSize), got \(unpaddedData.count)")
+        }
+        #endif
         
         guard unpaddedData.count >= headerSize + senderIDSize else { 
             return nil 
@@ -188,6 +198,24 @@ struct BinaryProtocol {
         }
         
         guard unpaddedData.count >= expectedSize else { 
+            // Debug: Log malformed packet details
+            #if DEBUG
+            let shortfall = expectedSize - unpaddedData.count
+            print("BinaryProtocol: Malformed packet - expected \(expectedSize) bytes, got \(unpaddedData.count) (short by \(shortfall) bytes)")
+            print("BinaryProtocol: PayloadLength=\(payloadLength), hasRecipient=\(hasRecipient), hasSignature=\(hasSignature), isCompressed=\(isCompressed)")
+            print("BinaryProtocol: HeaderSize=\(headerSize), SenderIDSize=\(senderIDSize)")
+            print("BinaryProtocol: RecipientIDSize=\(hasRecipient ? recipientIDSize : 0), SignatureSize=\(hasSignature ? signatureSize : 0)")
+            print("BinaryProtocol: Current offset=\(offset), remaining=\(unpaddedData.count - offset)")
+            print("BinaryProtocol: Original data size before unpadding: \(data.count)")
+            print("BinaryProtocol: Version=\(version), Type=\(type), TTL=\(ttl), Flags=0x\(String(flags, radix: 16))")
+            
+            // Check if this looks like packet fragmentation
+            if shortfall > 0 && shortfall < 100 {
+                print("BinaryProtocol: ⚠️  Possible packet fragmentation detected (missing \(shortfall) bytes)")
+            } else if payloadLength > 1000 {
+                print("BinaryProtocol: ⚠️  Unusually large payload length (\(payloadLength)) - possible corruption")
+            }
+            #endif
             return nil 
         }
         
@@ -207,6 +235,7 @@ struct BinaryProtocol {
         if isCompressed {
             // First 2 bytes are original size
             guard Int(payloadLength) >= 2 else { return nil }
+            guard offset + 2 <= unpaddedData.count else { return nil }
             let originalSizeData = unpaddedData[offset..<offset+2]
             let originalSize = Int(originalSizeData.reduce(0) { result, byte in
                 (result << 8) | UInt16(byte)
@@ -214,8 +243,10 @@ struct BinaryProtocol {
             offset += 2
             
             // Compressed payload
-            let compressedPayload = unpaddedData[offset..<offset+Int(payloadLength)-2]
-            offset += Int(payloadLength) - 2
+            let compressedPayloadLength = Int(payloadLength) - 2
+            guard offset + compressedPayloadLength <= unpaddedData.count else { return nil }
+            let compressedPayload = unpaddedData[offset..<offset+compressedPayloadLength]
+            offset += compressedPayloadLength
             
             // Decompress
             guard let decompressedPayload = CompressionUtil.decompress(compressedPayload, originalSize: originalSize) else {
@@ -223,6 +254,10 @@ struct BinaryProtocol {
             }
             payload = decompressedPayload
         } else {
+            // Additional bounds check for uncompressed payload
+            guard offset + Int(payloadLength) <= unpaddedData.count else { 
+                return nil 
+            }
             payload = unpaddedData[offset..<offset+Int(payloadLength)]
             offset += Int(payloadLength)
         }
@@ -230,6 +265,7 @@ struct BinaryProtocol {
         // Signature
         var signature: Data?
         if hasSignature {
+            guard offset + signatureSize <= unpaddedData.count else { return nil }
             signature = unpaddedData[offset..<offset+signatureSize]
         }
         
